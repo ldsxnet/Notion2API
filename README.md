@@ -69,3 +69,11 @@ docker compose -f docker-compose.prod.yml up -d --build
 - 首次启动后先访问 `/admin`，确认账号、配置和连通性是否正常
 - 常规本地使用直接运行二进制或 `go run` 即可
 - 需要容器化部署时优先使用 Docker Compose
+
+## 开源协议
+
+MIT License
+
+## 致谢
+
+本项目已在 [LINUX DO 社区](https://linux.do) 发布，感谢社区的支持与反馈。
