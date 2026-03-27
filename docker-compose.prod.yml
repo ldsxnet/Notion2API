@@ -9,7 +9,6 @@ services:
     expose:
       - "8787"
     volumes:
-      - ./config.docker.json:/app/config/config.json
       - notion2api-data:/app/data
     environment:
       TZ: Asia/Shanghai
@@ -25,7 +24,7 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    command: ["./notion2api", "--config", "/app/config/config.json"]
+    command: ["./notion2api", "--config", "/app/data/config.json"]
 
 volumes:
   notion2api-data:
