@@ -1284,6 +1284,10 @@ func buildChatStreamDeltaChoice(index int, delta map[string]any) map[string]any 
 	}
 }
 
+func buildChatStreamHeartbeatChoice(index int) map[string]any {
+	return buildChatStreamDeltaChoice(index, map[string]any{"content": ""})
+}
+
 func buildChatStreamFinishChoice(index int, finishReason string) map[string]any {
 	return map[string]any{
 		"index":         index,
