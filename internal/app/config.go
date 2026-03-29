@@ -47,7 +47,12 @@ type SessionRefreshConfig struct {
 }
 
 type StorageConfig struct {
-	SQLitePath string `json:"sqlite_path,omitempty"`
+	SQLitePath                   string `json:"sqlite_path,omitempty"`
+	PersistConversations         bool   `json:"persist_conversations"`
+	PersistConversationSnapshots *bool  `json:"persist_conversation_snapshots,omitempty"`
+	PersistResponses             *bool  `json:"persist_responses,omitempty"`
+	PersistContinuationSessions  *bool  `json:"persist_continuation_sessions,omitempty"`
+	PersistSillyTavernBindings   *bool  `json:"persist_sillytavern_bindings,omitempty"`
 }
 
 type PromptConfig struct {
@@ -198,7 +203,9 @@ func defaultConfig() AppConfig {
 		Responses: ResponsesConfig{
 			StoreTTLSeconds: 3600,
 		},
-		Storage: StorageConfig{},
+		Storage: StorageConfig{
+			PersistConversations: true,
+		},
 		Prompt: PromptConfig{
 			Profile:                          "cognitive_reframing",
 			FallbackProfiles:                 []string{"toolbox_capability_expansion"},
@@ -438,6 +445,44 @@ func loadConfigFile(path string) (AppConfig, error) {
 
 func sqliteBackedAccountStateEnabled(cfg AppConfig) bool {
 	return strings.TrimSpace(cfg.ResolveSQLitePath()) != ""
+}
+
+func sqliteBackedConversationStorageAvailable(cfg AppConfig) bool {
+	return strings.TrimSpace(cfg.ResolveSQLitePath()) != ""
+}
+
+func storageBoolWithFallback(value *bool, fallback bool) bool {
+	if value != nil {
+		return *value
+	}
+	return fallback
+}
+
+func conversationSnapshotsPersistenceEnabled(cfg AppConfig) bool {
+	return sqliteBackedConversationStorageAvailable(cfg) &&
+		storageBoolWithFallback(cfg.Storage.PersistConversationSnapshots, cfg.Storage.PersistConversations)
+}
+
+func responsesPersistenceEnabled(cfg AppConfig) bool {
+	return sqliteBackedConversationStorageAvailable(cfg) &&
+		storageBoolWithFallback(cfg.Storage.PersistResponses, cfg.Storage.PersistConversations)
+}
+
+func continuationSessionsPersistenceEnabled(cfg AppConfig) bool {
+	return sqliteBackedConversationStorageAvailable(cfg) &&
+		storageBoolWithFallback(cfg.Storage.PersistContinuationSessions, cfg.Storage.PersistConversations)
+}
+
+func sillyTavernBindingsPersistenceEnabled(cfg AppConfig) bool {
+	return sqliteBackedConversationStorageAvailable(cfg) &&
+		storageBoolWithFallback(cfg.Storage.PersistSillyTavernBindings, cfg.Storage.PersistConversations)
+}
+
+func sqliteBackedConversationStateEnabled(cfg AppConfig) bool {
+	return conversationSnapshotsPersistenceEnabled(cfg) ||
+		responsesPersistenceEnabled(cfg) ||
+		continuationSessionsPersistenceEnabled(cfg) ||
+		sillyTavernBindingsPersistenceEnabled(cfg)
 }
 
 func configForFilePersistence(cfg AppConfig) AppConfig {

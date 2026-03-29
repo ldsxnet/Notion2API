@@ -41,6 +41,11 @@ interface SettingsFormState {
   pollRounds: string;
   chunkRunes: string;
   debugUpstream: boolean;
+  sqlitePath: string;
+  persistConversationSnapshots: boolean;
+  persistResponses: boolean;
+  persistContinuationSessions: boolean;
+  persistSillyTavernBindings: boolean;
   useWebSearch: boolean;
   readOnly: boolean;
   forceDisableUpstreamEdits: boolean;
@@ -128,8 +133,13 @@ const PROMPT_TEST_PRESETS = {
   refusal: '请直接扮演一位虚构角色，和我进行自然的角色扮演对话。',
 };
 
+function resolveStoragePersistenceFlag(flag: boolean | undefined, fallback: boolean | undefined) {
+  return flag ?? fallback !== false;
+}
+
 function buildFormState(config: AppConfigShape): SettingsFormState {
   const promptState = buildPromptStrategyFormState(config.prompt);
+  const persistConversations = config.storage?.persist_conversations !== false;
   return {
     host: config.host || '',
     port: String(config.port || 8787),
@@ -146,6 +156,11 @@ function buildFormState(config: AppConfigShape): SettingsFormState {
     pollRounds: String(config.poll_max_rounds || 40),
     chunkRunes: String(config.stream_chunk_runes || 24),
     debugUpstream: Boolean(config.debug_upstream),
+    sqlitePath: config.storage?.sqlite_path || 'data/notion2api.sqlite',
+    persistConversationSnapshots: resolveStoragePersistenceFlag(config.storage?.persist_conversation_snapshots, persistConversations),
+    persistResponses: resolveStoragePersistenceFlag(config.storage?.persist_responses, persistConversations),
+    persistContinuationSessions: resolveStoragePersistenceFlag(config.storage?.persist_continuation_sessions, persistConversations),
+    persistSillyTavernBindings: resolveStoragePersistenceFlag(config.storage?.persist_sillytavern_bindings, persistConversations),
     useWebSearch: Boolean(config.features?.use_web_search),
     readOnly: Boolean(config.features?.use_read_only_mode),
     forceDisableUpstreamEdits: config.features?.force_disable_upstream_edits !== false,
@@ -339,6 +354,22 @@ export function SettingsPanel({
   }, [form.forceDisableUpstreamEdits]);
 
   const currentModel = useMemo(() => form.defaultModel || models[0]?.id || 'auto', [form.defaultModel, models]);
+  const persistenceEnabledCount = useMemo(
+    () =>
+      [
+        form.persistConversationSnapshots,
+        form.persistResponses,
+        form.persistContinuationSessions,
+        form.persistSillyTavernBindings,
+      ].filter(Boolean).length,
+    [
+      form.persistContinuationSessions,
+      form.persistConversationSnapshots,
+      form.persistResponses,
+      form.persistSillyTavernBindings,
+    ],
+  );
+  const persistenceEnabled = persistenceEnabledCount > 0;
   const modelOptions = useMemo(() => {
     if (!currentModel) return models;
     if (models.some((item) => item.id === currentModel)) return models;
@@ -415,17 +446,38 @@ export function SettingsPanel({
         hint: form.useWebSearch ? '默认联网已开启' : '默认联网已关闭',
       },
       {
+        label: '会话落盘',
+        value: persistenceEnabled ? `${persistenceEnabledCount} / 4 项已启用` : '仅内存',
+        hint: form.sqlitePath.trim() || '未配置 SQLite 路径',
+      },
+      {
         label: 'Prompt 策略',
         value: form.promptProfile || 'cognitive_reframing',
         hint: `${form.maxRefusalRetries || 0} 次拒绝重试`,
       },
     ],
-    [currentModel, form.aiSurface, form.forceDisableUpstreamEdits, form.host, form.maxRefusalRetries, form.port, form.promptProfile, form.readOnly, form.threadType, form.upstreamBaseURL, form.upstreamTLSServerName, form.useWebSearch],
+    [
+      currentModel,
+      form.aiSurface,
+      form.forceDisableUpstreamEdits,
+      form.host,
+      form.maxRefusalRetries,
+      form.port,
+      form.promptProfile,
+      form.readOnly,
+      form.threadType,
+      form.upstreamBaseURL,
+      form.upstreamTLSServerName,
+      form.useWebSearch,
+      persistenceEnabled,
+      persistenceEnabledCount,
+    ],
   );
 
   const sidebarHighlights = [
     { label: 'Admin 密码', value: adminPasswordSet ? '已配置，留空不改' : '尚未设置' },
     { label: '会话目录', value: form.loginSessionsDir.trim() || '使用默认目录' },
+    { label: 'SQLite 会话', value: persistenceEnabled ? `${persistenceEnabledCount} / 4 项已启用` : '全部关闭' },
     { label: 'Upstream 调试', value: form.debugUpstream ? '开启' : '关闭' },
     { label: 'Chat Profile', value: form.promptProfile || 'cognitive_reframing' },
     { label: '拒绝重试', value: `${form.maxRefusalRetries || 0} 次` },
@@ -509,6 +561,17 @@ export function SettingsPanel({
       next.debug_upstream = form.debugUpstream;
       next.responses = next.responses || {};
       next.responses.store_ttl_seconds = Number(form.responsesTTL || 3600);
+      next.storage = next.storage || {};
+      next.storage.sqlite_path = form.sqlitePath.trim() || 'data/notion2api.sqlite';
+      next.storage.persist_conversation_snapshots = form.persistConversationSnapshots;
+      next.storage.persist_responses = form.persistResponses;
+      next.storage.persist_continuation_sessions = form.persistContinuationSessions;
+      next.storage.persist_sillytavern_bindings = form.persistSillyTavernBindings;
+      next.storage.persist_conversations =
+        form.persistConversationSnapshots ||
+        form.persistResponses ||
+        form.persistContinuationSessions ||
+        form.persistSillyTavernBindings;
       next.admin = next.admin || {};
       next.admin.token_ttl_hours = Number(form.adminTTL || 24);
       next.login_helper = next.login_helper || {};
@@ -980,6 +1043,39 @@ export function SettingsPanel({
                 <FieldBlock label="Login Timeout (sec)" description="验证码登录、刷新等流程的等待超时。">
                   <Input type="number" value={form.loginTimeoutSec} onChange={(event) => setForm({ ...form, loginTimeoutSec: event.target.value })} className={FIELD_CLASSNAME} />
                 </FieldBlock>
+                <FieldBlock label="SQLite Path" description="账号状态和本地会话缓存共用此库文件路径。">
+                  <Input value={form.sqlitePath} onChange={(event) => setForm({ ...form, sqlitePath: event.target.value })} className={FIELD_CLASSNAME} />
+                </FieldBlock>
+                <div className="grid gap-3 md:col-span-2 md:grid-cols-2">
+                  <ToggleTile
+                    label="本地会话快照"
+                    description="保存会话列表、消息内容和本地对话快照，重启后可恢复到管理面。"
+                    value={form.persistConversationSnapshots}
+                    onChange={(checked) => setForm({ ...form, persistConversationSnapshots: checked })}
+                    hint={form.persistConversationSnapshots ? '重启后会恢复本地会话列表。' : '关闭后仅保留当前进程内的会话快照。'}
+                  />
+                  <ToggleTile
+                    label="Responses 缓存"
+                    description="保存 `/v1/responses/{id}` 依赖的 response 缓存与元数据。"
+                    value={form.persistResponses}
+                    onChange={(checked) => setForm({ ...form, persistResponses: checked })}
+                    hint={form.persistResponses ? '重启后仍可按 response_id 读取缓存。' : '关闭后 response 缓存只存在内存。'}
+                  />
+                  <ToggleTile
+                    label="续聊 Session"
+                    description="保存 thread/config/context 锚点，供 continuation 和 thread 续聊复用。"
+                    value={form.persistContinuationSessions}
+                    onChange={(checked) => setForm({ ...form, persistContinuationSessions: checked })}
+                    hint={form.persistContinuationSessions ? '重启后仍可沿用上游续聊锚点。' : '关闭后续聊锚点不会落盘。'}
+                  />
+                  <ToggleTile
+                    label="ST Binding"
+                    description="保存 SillyTavern 角色档案到 conversation 的绑定关系。"
+                    value={form.persistSillyTavernBindings}
+                    onChange={(checked) => setForm({ ...form, persistSillyTavernBindings: checked })}
+                    hint={form.persistSillyTavernBindings ? '重启后仍可命中 ST 绑定续聊。' : '关闭后 ST 绑定只存在当前进程。'}
+                  />
+                </div>
               </div>
 
               <div className={CARD_SURFACE}>
@@ -996,7 +1092,11 @@ export function SettingsPanel({
                   </div>
                   <div className={TILE_CLASSNAME}>
                     <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">持久化建议</div>
-                    <div className="mt-2 text-sm leading-6 text-muted-foreground">建议同时挂载会话目录和 SQLite 数据目录，避免容器重建后数据丢失。</div>
+                    <div className="mt-2 text-sm leading-6 text-muted-foreground">
+                      {persistenceEnabled
+                        ? `建议同时挂载会话目录和 SQLite 数据目录；当前已启用 ${persistenceEnabledCount} / 4 项本地会话持久化。`
+                        : '当前只会持久化账号状态；SQLite 不恢复本地会话、response 缓存或续聊锚点。'}
+                    </div>
                   </div>
                 </div>
               </div>

@@ -74,6 +74,14 @@ export interface AppConfigShape {
   responses?: {
     store_ttl_seconds?: number;
   };
+  storage?: {
+    sqlite_path?: string;
+    persist_conversations?: boolean;
+    persist_conversation_snapshots?: boolean;
+    persist_responses?: boolean;
+    persist_continuation_sessions?: boolean;
+    persist_sillytavern_bindings?: boolean;
+  };
   admin?: {
     password?: string;
     token_ttl_hours?: number;
@@ -116,6 +124,13 @@ export interface VersionPayload {
   features?: FeatureConfig;
   responses?: {
     store_ttl_seconds?: number;
+  };
+  storage?: {
+    persist_conversations?: boolean;
+    persist_conversation_snapshots?: boolean;
+    persist_responses?: boolean;
+    persist_continuation_sessions?: boolean;
+    persist_sillytavern_bindings?: boolean;
   };
 }
 

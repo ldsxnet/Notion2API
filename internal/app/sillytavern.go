@@ -9,11 +9,12 @@ import (
 )
 
 const (
-	sillyTavernClientProfile = "sillytavern"
-	sillyTavernModeNormal    = "normal"
-	sillyTavernModeContinue  = "continue"
-	sillyTavernModeQuiet     = "quiet"
-	sillyTavernModeImpersona = "impersonate"
+	sillyTavernClientProfile  = "sillytavern"
+	sillyTavernModeNormal     = "normal"
+	sillyTavernModeContinue   = "continue"
+	sillyTavernModeQuiet      = "quiet"
+	sillyTavernModeImpersona  = "impersonate"
+	sillyTavernContinuePrompt = "[Continue your last message without repeating its original content.]"
 )
 
 type SillyTavernBinding struct {
@@ -79,6 +80,33 @@ func buildSillyTavernContext(payload map[string]any) (sillyTavernContext, error)
 		RequestHidden:   requestHidden,
 		RequestSegments: normalizeConversationHistorySegments(normalized.Segments),
 	}, nil
+}
+
+func sillyTavernWantsReasoning(payload map[string]any) bool {
+	if payload == nil {
+		return true
+	}
+	if value, ok := payload["include_reasoning"]; ok {
+		return boolValue(value)
+	}
+	if value, ok := payload["show_thoughts"]; ok {
+		return boolValue(value)
+	}
+	if reasoning := mapValue(payload["reasoning"]); reasoning != nil {
+		if value, ok := reasoning["enabled"]; ok {
+			return boolValue(value)
+		}
+	}
+	return true
+}
+
+func sillyTavernContinuationPrompt(payload map[string]any) string {
+	if payload != nil {
+		if prefill := strings.TrimSpace(stringValue(payload["continue_prefill"])); prefill != "" {
+			return prefill
+		}
+	}
+	return sillyTavernContinuePrompt
 }
 
 func inferSillyTavernMode(payload map[string]any, normalized NormalizedInput) string {
@@ -423,6 +451,57 @@ func (a *App) resolveSillyTavernContinuation(r *http.Request, payload map[string
 		return sillyTavernContinuationMatch{SuppressPersist: true}, true
 	}
 
+	if ctx.Mode == sillyTavernModeContinue {
+		if explicitConversationID := requestedConversationID(r, payload); explicitConversationID != "" {
+			target := continuationTarget{}
+			if entry, ok := a.State.conversations().Get(explicitConversationID); ok && strings.TrimSpace(entry.ThreadID) != "" {
+				target.Conversation = entry
+			}
+			if state, err := a.State.loadConversationContinuationStateByConversationID(explicitConversationID); err == nil && state != nil {
+				target.Session = state
+				if strings.TrimSpace(target.Conversation.ID) == "" {
+					target.Conversation = ConversationEntry{
+						ID:           strings.TrimSpace(state.Session.ConversationID),
+						ThreadID:     strings.TrimSpace(state.Session.ThreadID),
+						AccountEmail: strings.TrimSpace(state.Session.AccountEmail),
+					}
+				}
+			}
+			if strings.TrimSpace(target.Conversation.ThreadID) != "" {
+				return sillyTavernContinuationMatch{
+					Target:            target,
+					ForceRepeatTurn:   true,
+					ResolvedByBinding: target.Session != nil,
+				}, true
+			}
+		}
+		if explicitThreadID := requestedThreadID(r, payload); explicitThreadID != "" {
+			target := continuationTarget{
+				Conversation: ConversationEntry{ThreadID: strings.TrimSpace(explicitThreadID)},
+			}
+			if entry, ok := a.State.conversations().FindByThreadID(explicitThreadID); ok {
+				target.Conversation = entry
+			}
+			if state, err := a.State.loadConversationContinuationStateByThreadID(explicitThreadID); err == nil && state != nil {
+				target.Session = state
+				if strings.TrimSpace(target.Conversation.ID) == "" {
+					target.Conversation = ConversationEntry{
+						ID:           strings.TrimSpace(state.Session.ConversationID),
+						ThreadID:     strings.TrimSpace(state.Session.ThreadID),
+						AccountEmail: strings.TrimSpace(state.Session.AccountEmail),
+					}
+				}
+			}
+			if strings.TrimSpace(target.Conversation.ThreadID) != "" {
+				return sillyTavernContinuationMatch{
+					Target:            target,
+					ForceRepeatTurn:   true,
+					ResolvedByBinding: target.Session != nil,
+				}, true
+			}
+		}
+	}
+
 	general, ok := a.resolveContinuationConversation(r, payload, "", ctx.StableHidden, ctx.RequestSegments)
 	if ok {
 		match := sillyTavernContinuationMatch{Target: general}
@@ -485,20 +564,22 @@ func (a *App) resolveSillyTavernContinuation(r *http.Request, payload map[string
 }
 
 func (s *ServerState) loadRecentSillyTavernBindings(profileKey string, limit int) ([]SillyTavernBinding, error) {
+	store := s.conversationPersistenceStore()
 	s.mu.RLock()
-	store := s.Store
+	enabled := sillyTavernBindingsPersistenceEnabled(s.Config)
 	s.mu.RUnlock()
-	if store == nil || strings.TrimSpace(profileKey) == "" {
+	if store == nil || !enabled || strings.TrimSpace(profileKey) == "" {
 		return nil, nil
 	}
 	return store.LoadRecentSillyTavernBindings(profileKey, limit)
 }
 
 func (s *ServerState) deleteSillyTavernBinding(conversationID string) {
+	store := s.conversationPersistenceStore()
 	s.mu.RLock()
-	store := s.Store
+	enabled := sillyTavernBindingsPersistenceEnabled(s.Config)
 	s.mu.RUnlock()
-	if store == nil || strings.TrimSpace(conversationID) == "" {
+	if store == nil || !enabled || strings.TrimSpace(conversationID) == "" {
 		return
 	}
 	if err := store.DeleteSillyTavernBinding(conversationID); err != nil {
@@ -514,8 +595,9 @@ func (a *App) persistSillyTavernBinding(conversationID string, profileKey string
 	}
 	a.State.mu.RLock()
 	store := a.State.Store
+	storeEnabled := store != nil && sillyTavernBindingsPersistenceEnabled(a.State.Config)
 	a.State.mu.RUnlock()
-	if store == nil {
+	if !storeEnabled {
 		return
 	}
 	entry, ok := a.State.conversations().Get(conversationID)

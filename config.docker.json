@@ -22,7 +22,12 @@
     "store_ttl_seconds": 3600
   },
   "storage": {
-    "sqlite_path": "/app/data/notion2api.sqlite"
+    "sqlite_path": "/app/data/notion2api.sqlite",
+    "persist_conversations": true,
+    "persist_conversation_snapshots": true,
+    "persist_responses": true,
+    "persist_continuation_sessions": true,
+    "persist_sillytavern_bindings": true
   },
   "admin": {
     "enabled": true,

@@ -858,10 +858,11 @@ func (s *ServerState) persistConversationSnapshot(conversationID string) {
 	if s == nil || strings.TrimSpace(conversationID) == "" {
 		return
 	}
+	store := s.conversationPersistenceStore()
 	s.mu.RLock()
-	store := s.Store
+	enabled := conversationSnapshotsPersistenceEnabled(s.Config)
 	s.mu.RUnlock()
-	if store == nil {
+	if store == nil || !enabled {
 		return
 	}
 	entry, ok := s.conversations().Get(conversationID)
@@ -887,8 +888,9 @@ func (s *ServerState) deleteResponsesByConversationOrThread(conversationID strin
 		}
 	}
 	store := s.Store
+	storeEnabled := store != nil && responsesPersistenceEnabled(s.Config)
 	s.mu.Unlock()
-	if store != nil {
+	if storeEnabled {
 		if err := store.DeleteResponsesByConversationOrThread(conversationID, threadID); err != nil {
 			log.Printf("[sqlite] delete responses conversation=%s thread=%s failed: %v", conversationID, threadID, err)
 		}
@@ -964,8 +966,9 @@ func (a *App) persistConversationSession(conversationID string, request PromptRu
 	}
 	a.State.mu.RLock()
 	store := a.State.Store
+	storeEnabled := store != nil && continuationSessionsPersistenceEnabled(a.State.Config)
 	a.State.mu.RUnlock()
-	if store == nil {
+	if !storeEnabled {
 		return
 	}
 	now := time.Now().UTC()

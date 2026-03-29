@@ -153,18 +153,22 @@ func newServerState(cfg AppConfig) (*ServerState, error) {
 		return nil, err
 	}
 	if store != nil {
-		responses, loadErr := store.LoadResponses(time.Duration(state.Config.Responses.StoreTTLSeconds) * time.Second)
-		if loadErr != nil {
-			_ = store.Close()
-			return nil, loadErr
+		if responsesPersistenceEnabled(state.Config) {
+			responses, loadErr := store.LoadResponses(time.Duration(state.Config.Responses.StoreTTLSeconds) * time.Second)
+			if loadErr != nil {
+				_ = store.Close()
+				return nil, loadErr
+			}
+			state.ResponsesByID = responses
 		}
-		state.ResponsesByID = responses
-		conversations, loadErr := store.LoadConversations()
-		if loadErr != nil {
-			_ = store.Close()
-			return nil, loadErr
+		if conversationSnapshotsPersistenceEnabled(state.Config) {
+			conversations, loadErr := store.LoadConversations()
+			if loadErr != nil {
+				_ = store.Close()
+				return nil, loadErr
+			}
+			state.Conversations = newConversationStoreFromEntries(conversations)
 		}
-		state.Conversations = newConversationStoreFromEntries(conversations)
 		if !persistedAccountsLoaded && (len(state.Config.Accounts) > 0 || strings.TrimSpace(state.Config.ActiveAccount) != "") {
 			if saveErr := store.SaveAccounts(state.Config); saveErr != nil {
 				_ = store.Close()
@@ -229,6 +233,15 @@ func (s *ServerState) SaveAndApply(cfg AppConfig) error {
 	return nil
 }
 
+func (s *ServerState) conversationPersistenceStore() *SQLiteStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.Store == nil || !sqliteBackedConversationStorageAvailable(s.Config) {
+		return nil
+	}
+	return s.Store
+}
+
 func (s *ServerState) cleanupExpiredResponsesLocked(now time.Time) {
 	ttlSeconds := maxInt(s.Config.Responses.StoreTTLSeconds, 1)
 	ttl := time.Duration(ttlSeconds) * time.Second
@@ -256,8 +269,9 @@ func (s *ServerState) saveResponseWithAccount(responseID string, payload map[str
 	}
 	store := s.Store
 	ttl := time.Duration(maxInt(s.Config.Responses.StoreTTLSeconds, 1)) * time.Second
+	storeEnabled := store != nil && responsesPersistenceEnabled(s.Config)
 	s.mu.Unlock()
-	if store != nil {
+	if storeEnabled {
 		if err := store.SaveResponse(responseID, payload, now, conversationID, threadID, accountEmail); err != nil {
 			log.Printf("[sqlite] save response %s failed: %v", responseID, err)
 			return
@@ -288,10 +302,11 @@ func (s *ServerState) getStoredResponse(responseID string) (StoredResponse, bool
 }
 
 func (s *ServerState) loadConversationContinuationStateByConversationID(conversationID string) (*conversationContinuationState, error) {
+	store := s.conversationPersistenceStore()
 	s.mu.RLock()
-	store := s.Store
+	enabled := continuationSessionsPersistenceEnabled(s.Config)
 	s.mu.RUnlock()
-	if store == nil || strings.TrimSpace(conversationID) == "" {
+	if store == nil || !enabled || strings.TrimSpace(conversationID) == "" {
 		return nil, nil
 	}
 	session, ok, err := store.LoadConversationSessionByConversationID(conversationID)
@@ -309,10 +324,11 @@ func (s *ServerState) loadConversationContinuationStateByConversationID(conversa
 }
 
 func (s *ServerState) loadConversationContinuationStateByThreadID(threadID string) (*conversationContinuationState, error) {
+	store := s.conversationPersistenceStore()
 	s.mu.RLock()
-	store := s.Store
+	enabled := continuationSessionsPersistenceEnabled(s.Config)
 	s.mu.RUnlock()
-	if store == nil || strings.TrimSpace(threadID) == "" {
+	if store == nil || !enabled || strings.TrimSpace(threadID) == "" {
 		return nil, nil
 	}
 	session, ok, err := store.LoadConversationSessionByThreadID(threadID)
@@ -330,10 +346,11 @@ func (s *ServerState) loadConversationContinuationStateByThreadID(threadID strin
 }
 
 func (s *ServerState) loadConversationContinuationStateByFingerprint(fingerprint string) (*conversationContinuationState, error) {
+	store := s.conversationPersistenceStore()
 	s.mu.RLock()
-	store := s.Store
+	enabled := continuationSessionsPersistenceEnabled(s.Config)
 	s.mu.RUnlock()
-	if store == nil || strings.TrimSpace(fingerprint) == "" {
+	if store == nil || !enabled || strings.TrimSpace(fingerprint) == "" {
 		return nil, nil
 	}
 	session, ok, err := store.LoadConversationSessionByFingerprint(fingerprint)
@@ -351,10 +368,11 @@ func (s *ServerState) loadConversationContinuationStateByFingerprint(fingerprint
 }
 
 func (s *ServerState) deleteConversationSessionByConversationOrThread(conversationID string, threadID string) {
+	store := s.conversationPersistenceStore()
 	s.mu.RLock()
-	store := s.Store
+	enabled := continuationSessionsPersistenceEnabled(s.Config)
 	s.mu.RUnlock()
-	if store == nil {
+	if store == nil || !enabled {
 		return
 	}
 	if err := store.DeleteConversationSessionByConversationOrThread(conversationID, threadID); err != nil {
@@ -363,10 +381,11 @@ func (s *ServerState) deleteConversationSessionByConversationOrThread(conversati
 }
 
 func (s *ServerState) invalidateConversationSession(sessionID string, status string) {
+	store := s.conversationPersistenceStore()
 	s.mu.RLock()
-	store := s.Store
+	enabled := continuationSessionsPersistenceEnabled(s.Config)
 	s.mu.RUnlock()
-	if store == nil || strings.TrimSpace(sessionID) == "" {
+	if store == nil || !enabled || strings.TrimSpace(sessionID) == "" {
 		return
 	}
 	if err := store.MarkConversationSessionStatus(sessionID, status); err != nil {
@@ -825,14 +844,22 @@ func (a *App) markEphemeralConversationRequest(request *PromptRunRequest) {
 	if request == nil {
 		return
 	}
-	if request.ClientProfile != sillyTavernClientProfile || request.ClientMode != sillyTavernModeQuiet {
+	if request.ClientProfile != sillyTavernClientProfile {
 		return
 	}
 	if request.EphemeralConversation {
 		return
 	}
-	request.EphemeralConversation = true
-	request.EphemeralReason = "sillytavern_quiet"
+	switch request.ClientMode {
+	case sillyTavernModeQuiet:
+		request.EphemeralConversation = true
+		request.EphemeralReason = "sillytavern_quiet"
+	case sillyTavernModeImpersona:
+		request.EphemeralConversation = true
+		request.EphemeralReason = "sillytavern_impersonate"
+	default:
+		return
+	}
 }
 
 func (a *App) cleanupExpiredEphemeralConversations() {
@@ -873,6 +900,22 @@ func includeUsageInStream(payload map[string]any) bool {
 	options := mapValue(payload["stream_options"])
 	includeUsage, _ := options["include_usage"].(bool)
 	return includeUsage
+}
+
+func chatCompletionInitialFlushDelayForRequest(request PromptRunRequest) time.Duration {
+	if request.ClientProfile == sillyTavernClientProfile || request.StreamReasoningWarmup {
+		return 0
+	}
+	return chatCompletionInitialFlushDelay
+}
+
+func applyInferenceResultOutputPolicy(result InferenceResult, request PromptRunRequest) InferenceResult {
+	result.Text = sanitizeAssistantVisibleText(result.Text)
+	result.Reasoning = sanitizeAssistantVisibleText(result.Reasoning)
+	if request.SuppressReasoningOutput {
+		result.Reasoning = ""
+	}
+	return result
 }
 
 func (a *App) runPrompt(r *http.Request, request PromptRunRequest) (InferenceResult, error) {
@@ -968,6 +1011,7 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		a.writeUpstreamError(w, err)
 		return
 	}
+	result = applyInferenceResultOutputPolicy(result, request)
 	responsePayload := buildChatCompletion(result, entry.ID, cfg.DebugUpstream)
 	attachConversationResponseMetadata(responsePayload, conversationID, result.ThreadID)
 	setThreadIDHeader(w, result.ThreadID)
@@ -1020,6 +1064,10 @@ func (a *App) handleSillyTavernChatCompletionsPayload(w http.ResponseWriter, r *
 		SessionFingerprint: originalFingerprint,
 		RawMessageCount:    originalRawMessageCount,
 	}
+	request.SuppressReasoningOutput = !sillyTavernWantsReasoning(payload)
+	if streamEnabled, _ := payload["stream"].(bool); streamEnabled && !request.SuppressReasoningOutput {
+		request.StreamReasoningWarmup = true
+	}
 	a.markEphemeralConversationRequest(&request)
 
 	preferredConversationID := requestedConversationID(r, payload)
@@ -1033,7 +1081,7 @@ func (a *App) handleSillyTavernChatCompletionsPayload(w http.ResponseWriter, r *
 		request.ForceSessionRepeatTurn = matched.ForceRepeatTurn
 		if request.UpstreamThreadID != "" {
 			if ctx.Mode == sillyTavernModeContinue {
-				request.Prompt = ctx.Normalized.Prompt
+				request.Prompt = sillyTavernContinuationPrompt(payload)
 			} else {
 				request.Prompt = ctx.LatestPrompt
 			}
@@ -1066,6 +1114,7 @@ func (a *App) handleSillyTavernChatCompletionsPayload(w http.ResponseWriter, r *
 		a.writeUpstreamError(w, err)
 		return
 	}
+	result = applyInferenceResultOutputPolicy(result, request)
 	responsePayload := buildChatCompletion(result, entry.ID, cfg.DebugUpstream)
 	attachConversationResponseMetadata(responsePayload, conversationID, result.ThreadID)
 	setThreadIDHeader(w, result.ThreadID)
@@ -1153,6 +1202,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		a.writeUpstreamError(w, err)
 		return
 	}
+	result = applyInferenceResultOutputPolicy(result, request)
 	responsePayload := buildResponsesOutputWithIDs(
 		result,
 		entry.ID,
@@ -1265,6 +1315,7 @@ func (a *App) writeChatCompletionLiveStream(w http.ResponseWriter, r *http.Reque
 	created := time.Now().Unix()
 	var emittedVisibleText strings.Builder
 	var emittedReasoning strings.Builder
+	warmupSent := false
 	const reasoningHeartbeat = "\u200b"
 	var writeMu sync.Mutex
 	headersSent := false
@@ -1304,7 +1355,7 @@ func (a *App) writeChatCompletionLiveStream(w http.ResponseWriter, r *http.Reque
 		}, nil))
 	}
 	emitReasoning := func(part string) error {
-		if part == "" {
+		if part == "" || request.SuppressReasoningOutput {
 			return nil
 		}
 		if err := startStream(); err != nil {
@@ -1316,12 +1367,16 @@ func (a *App) writeChatCompletionLiveStream(w http.ResponseWriter, r *http.Reque
 		}, nil))
 	}
 	emitReasoningWarmup := func() error {
-		if !request.StreamReasoningWarmup {
+		if !request.StreamReasoningWarmup || request.SuppressReasoningOutput {
+			return nil
+		}
+		if warmupSent {
 			return nil
 		}
 		if err := startStream(); err != nil {
 			return err
 		}
+		warmupSent = true
 		return safeWriteData(buildChatStreamChunk(completionID, created, modelID, []map[string]any{
 			buildChatStreamReasoningChoice(0, reasoningHeartbeat),
 		}, nil))
@@ -1336,11 +1391,12 @@ func (a *App) writeChatCompletionLiveStream(w http.ResponseWriter, r *http.Reque
 	}
 	stopProactiveFlush := make(chan struct{})
 	defer close(stopProactiveFlush)
-	if chatCompletionInitialFlushDelay <= 0 {
+	if chatCompletionInitialFlushDelayForRequest(request) <= 0 {
 		_ = startStream()
+		_ = emitReasoningWarmup()
 	} else {
 		go func() {
-			timer := time.NewTimer(chatCompletionInitialFlushDelay)
+			timer := time.NewTimer(chatCompletionInitialFlushDelayForRequest(request))
 			defer timer.Stop()
 			for {
 				select {
@@ -1381,6 +1437,7 @@ func (a *App) writeChatCompletionLiveStream(w http.ResponseWriter, r *http.Reque
 				Prompt: request.Prompt,
 				Text:   partialText,
 			}
+			partialResult = applyInferenceResultOutputPolicy(partialResult, request)
 			a.completeConversation(conversationID, partialResult)
 			a.persistConversationSession(conversationID, request, partialResult)
 			if request.ClientProfile == sillyTavernClientProfile && !request.SuppressUpstreamThreadPersistence {
@@ -1400,8 +1457,7 @@ func (a *App) writeChatCompletionLiveStream(w http.ResponseWriter, r *http.Reque
 		safeWriteDone()
 		return
 	}
-	result.Text = sanitizeAssistantVisibleText(result.Text)
-	result.Reasoning = sanitizeAssistantVisibleText(result.Reasoning)
+	result = applyInferenceResultOutputPolicy(result, request)
 	a.completeConversation(conversationID, result)
 	a.persistConversationSession(conversationID, request, result)
 	if request.ClientProfile == sillyTavernClientProfile && !request.SuppressUpstreamThreadPersistence {
@@ -1497,6 +1553,7 @@ func (a *App) writeResponsesLiveStream(w http.ResponseWriter, r *http.Request, r
 	}
 	var emittedVisibleText strings.Builder
 	var emittedReasoning strings.Builder
+	warmupSent := false
 	const reasoningHeartbeat = "\u200b"
 	reasoningPhaseStarted := false
 	reasoningPhaseDone := false
@@ -1524,7 +1581,7 @@ func (a *App) writeResponsesLiveStream(w http.ResponseWriter, r *http.Request, r
 		return safeWriteEvent("response.output_text.delta", buildResponsesOutputTextDeltaEvent(responseID, outputItemID, part))
 	}
 	emitReasoningDelta := func(part string) error {
-		if part == "" {
+		if part == "" || request.SuppressReasoningOutput {
 			return nil
 		}
 		if err := startStream(); err != nil {
@@ -1535,12 +1592,16 @@ func (a *App) writeResponsesLiveStream(w http.ResponseWriter, r *http.Request, r
 		return safeWriteEvent("response.reasoning.delta", buildResponsesReasoningDeltaEvent(responseID, outputItemID, part))
 	}
 	emitReasoningWarmup := func() error {
-		if !request.StreamReasoningWarmup {
+		if !request.StreamReasoningWarmup || request.SuppressReasoningOutput {
+			return nil
+		}
+		if warmupSent {
 			return nil
 		}
 		if err := startStream(); err != nil {
 			return err
 		}
+		warmupSent = true
 		reasoningPhaseStarted = true
 		return safeWriteEvent("response.reasoning.delta", buildResponsesReasoningDeltaEvent(responseID, outputItemID, reasoningHeartbeat))
 	}
@@ -1549,6 +1610,10 @@ func (a *App) writeResponsesLiveStream(w http.ResponseWriter, r *http.Request, r
 			return err
 		}
 		return safeWriteEvent("response.in_progress", buildResponsesInProgressEvent(inProgressResponse))
+	}
+
+	if request.StreamReasoningWarmup {
+		_ = emitReasoningWarmup()
 	}
 
 	result, err := a.runPromptStreamWithSink(r, request, InferenceStreamSink{
@@ -1577,6 +1642,7 @@ func (a *App) writeResponsesLiveStream(w http.ResponseWriter, r *http.Request, r
 				Text:      partialText,
 				Reasoning: partialReasoning,
 			}
+			partialResult = applyInferenceResultOutputPolicy(partialResult, request)
 			completedResponse := buildResponsesOutputWithIDs(partialResult, modelID, includeTrace, responseID, outputItemID, createdAt)
 			attachConversationResponseMetadata(completedResponse, conversationID, "")
 			a.State.saveResponseWithAccount(responseID, completedResponse, conversationID, "", "")
@@ -1623,13 +1689,13 @@ func (a *App) writeResponsesLiveStream(w http.ResponseWriter, r *http.Request, r
 		return
 	}
 
-	finalText := sanitizeAssistantVisibleText(result.Text)
+	result = applyInferenceResultOutputPolicy(result, request)
+	finalText := result.Text
 	if strings.TrimSpace(result.Text) == "" && strings.TrimSpace(finalText) != "" {
 		result.Text = finalText
 	} else if strings.TrimSpace(result.Text) != finalText {
 		result.Text = finalText
 	}
-	result.Reasoning = sanitizeAssistantVisibleText(result.Reasoning)
 	if remainingReasoning := textDeltaSuffix(emittedReasoning.String(), result.Reasoning); remainingReasoning != "" {
 		if err := emitReasoningDelta(remainingReasoning); err != nil {
 			return
